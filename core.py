@@ -1593,12 +1593,24 @@ def assign_common_stops_to_routes(
         if from_full is None or to_full is None:
             return actual
 
+        factory_point = coordinates[0]
+        from_point = coordinates[from_full]
+        to_point = coordinates[to_full]
+
+        from_factory_km = haversine_km(from_point, factory_point)
+        to_factory_km = haversine_km(to_point, factory_point)
+        arc_km = haversine_km(from_point, to_point)
+
         if direction == "morning":
             from_factory_seconds = float(duration_matrix[from_full][0])
             to_factory_seconds = float(duration_matrix[to_full][0])
             wrong_way_seconds = max(
                 0.0,
                 to_factory_seconds - from_factory_seconds,
+            )
+            radial_progress_km = max(
+                0.0,
+                from_factory_km - to_factory_km,
             )
         else:
             from_factory_seconds = float(duration_matrix[0][from_full])
@@ -1607,12 +1619,24 @@ def assign_common_stops_to_routes(
                 0.0,
                 from_factory_seconds - to_factory_seconds,
             )
+            radial_progress_km = max(
+                0.0,
+                to_factory_km - from_factory_km,
+            )
 
-        # Fabrikaya ilerlerken tekrar uzaklaşan geçişlere ek optimizasyon
-        # maliyeti verilir. Bu değer yalnızca rota seçimini etkiler;
-        # gerçek süre kısıtı transit_callback üzerinden hesaplanmaya devam eder.
+        # Ters yön cezası: fabrikaya yaklaşması gerekirken uzaklaşmayı caydırır.
         backtrack_penalty = int(round(wrong_way_seconds * 1.5))
-        return actual + backtrack_penalty
+
+        # Koridor/zikzak cezası: araç fabrikaya doğru anlamlı ilerleme sağlamadan
+        # uzun bir yan geçiş yapıyorsa maliyeti artırır. Bu ceza yalnızca
+        # optimizasyon tercihidir; gerçek süre ve 100 dk sınırını etkilemez.
+        lateral_km = max(
+            0.0,
+            arc_km - (radial_progress_km * 1.35),
+        )
+        lateral_penalty = int(round(lateral_km * 120.0))
+
+        return actual + backtrack_penalty + lateral_penalty
 
     cost_callback = routing.RegisterTransitCallback(route_cost_seconds)
     routing.SetArcCostEvaluatorOfAllVehicles(cost_callback)
