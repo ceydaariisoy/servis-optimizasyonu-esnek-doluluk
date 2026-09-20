@@ -1574,9 +1574,9 @@ def assign_common_stops_to_routes(
     )
 
     # Kapasite yalnızca üst sınırdır; yolcu sayıları eşitlenmez.
-    # Sabit rota sayısı seçildiğinde ise kullanıcının seçtiği her servis aktif
-    # olmalıdır. Bu yalnızca "rota boş kalmasın" kısıtıdır; araç doluluklarını
-    # birbirine yaklaştıran herhangi bir hedef/ceza uygulanmaz.
+    # İstenirse tüm araçların aktif olması solver seviyesinde zorlanabilir.
+    # Ana Streamlit akışı sabit rota sayısını daha sağlam biçimde, çözüm sonrası
+    # güzergâhı süre bazlı bölerek tamamlar.
     if require_all_vehicles_active:
         if vehicle_count > len(stops):
             raise ValueError(
