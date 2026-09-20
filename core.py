@@ -1580,9 +1580,9 @@ def assign_common_stops_to_routes(
         """Gerçek süreye yalnızca optimizasyon amaçlı geri-dönüş cezası ekler.
 
         Sabah rotasında araç genel olarak fabrikaya yaklaşmalıdır. Bir sonraki
-        durağa geçerken fabrikadan yeniden uzaklaşılıyorsa maliyete ek ceza
-        yazılır. Bu ceza Time dimension'a girmez; dolayısıyla ekranda görülen
-        rota süresi ve azami süre kontrolü gerçek OSRM süresidir.
+        durağa geçerken fabrikaya kalan OSRM süresi yeniden artıyorsa maliyete
+        ek ceza yazılır. Bu ceza Time dimension'a girmez; dolayısıyla ekranda
+        görülen rota süresi ve azami süre kontrolü gerçek OSRM süresidir.
         """
         actual = travel_seconds(from_index, to_index)
         from_node = manager.IndexToNode(from_index)
@@ -1594,17 +1594,24 @@ def assign_common_stops_to_routes(
             return actual
 
         if direction == "morning":
-            from_factory_distance = float(distance_matrix[from_full][0])
-            to_factory_distance = float(distance_matrix[to_full][0])
-            wrong_way_m = max(0.0, to_factory_distance - from_factory_distance)
+            from_factory_seconds = float(duration_matrix[from_full][0])
+            to_factory_seconds = float(duration_matrix[to_full][0])
+            wrong_way_seconds = max(
+                0.0,
+                to_factory_seconds - from_factory_seconds,
+            )
         else:
-            from_factory_distance = float(distance_matrix[0][from_full])
-            to_factory_distance = float(distance_matrix[0][to_full])
-            wrong_way_m = max(0.0, from_factory_distance - to_factory_distance)
+            from_factory_seconds = float(duration_matrix[0][from_full])
+            to_factory_seconds = float(duration_matrix[0][to_full])
+            wrong_way_seconds = max(
+                0.0,
+                from_factory_seconds - to_factory_seconds,
+            )
 
-        # 1 km ters yön yaklaşık 2 dakika ek optimizasyon maliyeti yaratır.
-        # Ama gerçek rota süresini değiştirmez.
-        backtrack_penalty = int(round(wrong_way_m * 0.12))
+        # Fabrikaya ilerlerken tekrar uzaklaşan geçişlere ek optimizasyon
+        # maliyeti verilir. Bu değer yalnızca rota seçimini etkiler;
+        # gerçek süre kısıtı transit_callback üzerinden hesaplanmaya devam eder.
+        backtrack_penalty = int(round(wrong_way_seconds * 1.5))
         return actual + backtrack_penalty
 
     cost_callback = routing.RegisterTransitCallback(route_cost_seconds)
