@@ -21,7 +21,7 @@ from core import (
 )
 
 
-APP_VERSION = "2026.09.20-practical-fixed-routes-v5"
+APP_VERSION = "2026.09.21-mixed-fleet-v6"
 FIXED_TARGET_AVERAGE_WALK_M = 400
 FIXED_WAIT_SECONDS_PER_STOP = 15
 MORNING_FACTORY_ARRIVAL_SECONDS = 7 * 3600 + 55 * 60
@@ -838,20 +838,27 @@ def build_shared_routes(
     use_road_network: bool,
     approved_candidates: list[tuple],
     allow_automatic_candidates: bool,
+    vehicle_capacities: list[int] | None = None,
 ):
-    """
-    Ortak durakları ve servis rotalarını oluşturur.
-
-    Temel kurallar:
-    - Rota grupları sabah yönünde optimize edilir.
-    - Akşam aynı çalışanlar aynı serviste kalır; yalnızca durak sırası ters çevrilir.
-    - Azami rota süresi hem sabah hem akşam için HARD constraint olarak doğrulanır.
-    - Otomatik modda sınır sağlanmıyorsa araç sayısı artırılır.
-    - OR-Tools'un boş bıraktığı araçlar sonuçtan kaldırılır; ekranda gerçek aktif rota sayısı gösterilir.
-    """
+    """Ortak durakları ve servis rotalarını oluşturur."""
     employee_coordinates = list(
         zip(employees["Enlem"].astype(float), employees["Boylam"].astype(float))
     )
+
+    mixed_fleet = bool(vehicle_capacities)
+    if mixed_fleet:
+        vehicle_capacities = [int(value) for value in vehicle_capacities]
+        if len(vehicle_capacities) != 4:
+            raise ValueError("Karma filo planında 2 büyük + 2 küçük olmak üzere 4 araç bulunmalıdır.")
+        capacity = max(vehicle_capacities)
+        fixed_vehicle_count = 4
+        mode = "fixed"
+        if sum(vehicle_capacities) < len(employees):
+            raise ValueError(
+                f"Seçilen karma filonun toplam kapasitesi {sum(vehicle_capacities)} kişi; "
+                f"{len(employees)} çalışan için yetersiz."
+            )
+
     candidates = generate_candidate_stops(
         employee_coordinates,
         max_walk_m=max_walk_m,
@@ -868,17 +875,16 @@ def build_shared_routes(
         walking_factor=1.20,
     )
 
-    # Bir fiziksel durakta araç kapasitesinden fazla çalışan toplanmışsa,
-    # aynı durağı kapasiteye uygun mantıksal parçalara ayır. Böylece örneğin
-    # aynı noktadaki 60 çalışan iki farklı servis tarafından alınabilir.
+    # Aynı fiziksel durakta en büyük aracın kapasitesinden fazla kişi varsa
+    # durak aynı konum korunarak mantıksal parçalara ayrılır.
     capacity_limited_stops: list[CommonStop] = []
     for stop in all_stops:
         pairs = list(zip(stop.member_indices, stop.walking_distances_m))
         if len(pairs) <= capacity:
             capacity_limited_stops.append(stop)
             continue
-        for start in range(0, len(pairs), capacity):
-            chunk = pairs[start : start + capacity]
+        for chunk_start in range(0, len(pairs), capacity):
+            chunk = pairs[chunk_start : chunk_start + capacity]
             capacity_limited_stops.append(
                 CommonStop(
                     anchor_index=stop.anchor_index,
@@ -905,20 +911,23 @@ def build_shared_routes(
     )
 
     minimum_vehicle_count = math.ceil(len(employees) / capacity)
-    vehicle_count = int(fixed_vehicle_count) if mode == "fixed" else minimum_vehicle_count
-    if vehicle_count < minimum_vehicle_count:
-        raise ValueError(
-            f"{vehicle_count} araç yetersiz. Bu kapasiteyle en az {minimum_vehicle_count} araç gerekir."
+    if mixed_fleet:
+        vehicle_count = 4
+        maximum_vehicle_count = 4
+    else:
+        vehicle_count = int(fixed_vehicle_count) if mode == "fixed" else minimum_vehicle_count
+        if vehicle_count < minimum_vehicle_count:
+            raise ValueError(
+                f"{vehicle_count} araç yetersiz. Bu kapasiteyle en az {minimum_vehicle_count} araç gerekir."
+            )
+        maximum_vehicle_count = max(
+            vehicle_count,
+            min(len(all_stops), minimum_vehicle_count + 8),
         )
 
-    # Aynı servis grubu geliş/dönüşte korunduğu için dağılım HER ZAMAN sabah yönünde çözülür.
     planning_direction = "morning"
     last_error: Exception | None = None
     last_direction_violation = ""
-    maximum_vehicle_count = max(
-        vehicle_count,
-        min(len(all_stops), minimum_vehicle_count + 8),
-    )
 
     while vehicle_count <= maximum_vehicle_count:
         try:
@@ -931,25 +940,29 @@ def build_shared_routes(
                 planning_direction,
                 wait_seconds_per_stop=wait_seconds_per_stop,
                 max_route_minutes=max_route_minutes,
-                time_limit_seconds=15,
-                require_all_vehicles_active=False,
+                time_limit_seconds=30 if mixed_fleet else 15,
+                require_all_vehicles_active=mixed_fleet,
+                vehicle_capacities=vehicle_capacities if mixed_fleet else None,
             )
 
-            # OR-Tools boş bırakabildiği araçları sonuçtan çıkarır. Sabit servis
-            # sayısı seçilmişse eksik aktif rota sayısı, mevcut rota sırasını
-            # koruyan süre-bazlı bölmelerle tamamlanır. Yolcu sayıları eşitlenmez.
-            active_candidate_routes = [route for route in candidate_routes if route]
-            if not active_candidate_routes and len(employees):
-                raise ValueError("Optimizasyon aktif bir servis rotası üretemedi.")
-
-            if mode == "fixed":
-                active_candidate_routes = _split_routes_to_target_count(
-                    active_candidate_routes,
-                    int(fixed_vehicle_count),
-                    duration_matrix,
-                    wait_seconds_per_stop,
-                    max_route_minutes,
-                )
+            if mixed_fleet:
+                active_candidate_routes = list(candidate_routes)
+                if len(active_candidate_routes) != 4 or any(not route for route in active_candidate_routes):
+                    raise ValueError(
+                        "2 büyük + 2 küçük servis planında dört aracın da aktif olduğu çözüm bulunamadı."
+                    )
+            else:
+                active_candidate_routes = [route for route in candidate_routes if route]
+                if not active_candidate_routes and len(employees):
+                    raise ValueError("Optimizasyon aktif bir servis rotası üretemedi.")
+                if mode == "fixed":
+                    active_candidate_routes = _split_routes_to_target_count(
+                        active_candidate_routes,
+                        int(fixed_vehicle_count),
+                        duration_matrix,
+                        wait_seconds_per_stop,
+                        max_route_minutes,
+                    )
 
             morning_times, evening_times = _same_route_directional_times(
                 active_candidate_routes,
@@ -960,13 +973,12 @@ def build_shared_routes(
                 morning_times, evening_times, max_route_minutes
             )
 
-            # OR-Tools sabah sınırını model içinde uygular. Burada ayrıca aynı rota grubunun
-            # ters akşam seferini de kontrol ediyoruz. Böylece 70 dk iki yön için de gerçek sınırdır.
             if max_route_minutes and last_direction_violation:
                 if mode == "fixed":
+                    fleet_text = "2 büyük + 2 küçük servis" if mixed_fleet else f"Sabit {fixed_vehicle_count} servis"
                     raise ValueError(
-                        f"Sabit {fixed_vehicle_count} servis ile {max_route_minutes} dk sınırı her iki yönde sağlanamıyor. "
-                        f"{last_direction_violation}. Rota sayısını Otomatik seçin."
+                        f"{fleet_text} ile {max_route_minutes} dk sınırı her iki yönde sağlanamıyor. "
+                        f"{last_direction_violation}."
                     )
                 vehicle_count += 1
                 continue
@@ -989,12 +1001,10 @@ def build_shared_routes(
             "Araç kapasitesini, rota süresini veya durak yapısını kontrol edin."
         ) from last_error
 
-    # Nihai süreleri aktif sabah rota grupları üzerinden sakla.
     morning_times, evening_times = _same_route_directional_times(
         allocated_routes, duration_matrix, wait_seconds_per_stop
     )
 
-    # Kullanıcı akşam görünümünü seçerse aynı rota gruplarını ters sırada göster.
     output_routes = (
         reverse_routes_for_return(allocated_routes)
         if direction == "evening"
@@ -1008,7 +1018,21 @@ def build_shared_routes(
         wait_seconds_per_stop,
     )
 
-    if any(stop.source in {"Otomatik ortak nokta", "Güzergâh üzeri aday durak", "Güzergâha yakın yeni durak"} for stop in all_stops):
+    if mixed_fleet:
+        route_capacities = list(vehicle_capacities)
+        route_types = ["Büyük servis", "Büyük servis", "Küçük servis", "Küçük servis"]
+    else:
+        route_capacities = [int(capacity)] * len(shared_routes)
+        route_types = ["Standart servis"] * len(shared_routes)
+
+    for route, route_capacity, route_type in zip(shared_routes, route_capacities, route_types):
+        route["vehicle_capacity"] = int(route_capacity)
+        route["vehicle_type"] = route_type
+
+    if any(
+        stop.source in {"Otomatik ortak nokta", "Güzergâh üzeri aday durak", "Güzergâha yakın yeni durak"}
+        for stop in all_stops
+    ):
         warnings.append(
             "Otomatik/adres tabanlı duraklar matematiksel adaydır; kaldırım, yaya geçidi ve "
             "güvenli bekleme alanı sahada onaylanmalıdır."
@@ -1025,6 +1049,9 @@ def build_shared_routes(
         "minimum_proven": minimum_proven,
         "selected_stop_count": len(all_stops),
         "route_loads": [sum(stop.passenger_count for stop in route) for route in allocated_routes],
+        "route_capacities": route_capacities,
+        "route_types": route_types,
+        "mixed_fleet": mixed_fleet,
         "load_spread": (
             max((sum(stop.passenger_count for stop in route) for route in allocated_routes), default=0)
             - min((sum(stop.passenger_count for stop in route) for route in allocated_routes), default=0)
@@ -1055,8 +1082,13 @@ def build_incremental_shared_routes(
     use_road_network: bool,
     approved_candidates: list[tuple],
     allow_automatic_candidates: bool,
+    vehicle_capacities: list[int] | None = None,
 ):
     """Mevcut planı günceller; rota grubu geliş/dönüşte aynı kalır."""
+    if vehicle_capacities:
+        raise ValueError(
+            "2 Büyük + 2 Küçük servis planı için 'Tam optimizasyon' seçilmelidir."
+        )
     employee_coordinates = list(
         zip(employees["Enlem"].astype(float), employees["Boylam"].astype(float))
     )
@@ -1126,9 +1158,14 @@ def result_workbook(shared_routes, employees: pd.DataFrame, capacity: int) -> by
             {
                 "Rota": f"Rota {route['vehicle_no']}",
                 "Hedef_Fabrika_Saati": route.get("factory_time", ""),
+                "Araç_Tipi": route.get("vehicle_type", "Standart servis"),
                 "Yolcu": route["occupancy"],
-                "Kapasite": capacity,
-                "Doluluk_Orani": route["occupancy"] / capacity,
+                "Kapasite": route.get("vehicle_capacity", capacity),
+                "Doluluk_Orani": (
+                    route["occupancy"] / route.get("vehicle_capacity", capacity)
+                    if route.get("vehicle_capacity", capacity)
+                    else 0
+                ),
                 "Toplam_Durak_Sayisi": len(route["stops"]),
                 "Coklu_Ortak_Durak": sum(stop["passenger_count"] > 1 for stop in route["stops"]),
                 "Tekil_Durak": sum(stop["passenger_count"] == 1 for stop in route["stops"]),
@@ -1193,8 +1230,8 @@ def result_workbook(shared_routes, employees: pd.DataFrame, capacity: int) -> by
                 sheet.set_column(col, col, width)
             sheet.freeze_panes(1, 0)
             sheet.autofilter(0, 0, max(len(frame), 1), max(len(frame.columns) - 1, 0))
-        writer.sheets["Rota_Ozeti"].set_column("D:D", 15, percent)
-        writer.sheets["Rota_Ozeti"].set_column("E:M", 18)
+        writer.sheets["Rota_Ozeti"].set_column("F:F", 15, percent)
+        writer.sheets["Rota_Ozeti"].set_column("E:N", 18)
     return output.getvalue()
 
 
@@ -1224,6 +1261,7 @@ with st.sidebar:
                 "Otomatik (kapasite + süreye göre)",
                 "Sabit 3 servis",
                 "Sabit 4 servis",
+                "2 Büyük + 2 Küçük servis",
             ],
         )
         stop_policy_label = st.selectbox(
@@ -1240,13 +1278,41 @@ with st.sidebar:
         )
 
     with st.expander("Kapasite ve süre kısıtları", expanded=True):
-        capacity = st.number_input(
-            "Araç kapasitesi",
-            min_value=1,
-            max_value=100,
-            value=45,
-            step=1,
-        )
+        mixed_fleet_selected = mode_label.startswith("2 Büyük")
+        if mixed_fleet_selected:
+            cap_col1, cap_col2 = st.columns(2)
+            with cap_col1:
+                big_capacity = st.number_input(
+                    "Büyük servis kapasitesi",
+                    min_value=1,
+                    max_value=100,
+                    value=45,
+                    step=1,
+                )
+            with cap_col2:
+                small_capacity = st.number_input(
+                    "Küçük servis kapasitesi",
+                    min_value=1,
+                    max_value=100,
+                    value=27,
+                    step=1,
+                )
+            capacity = max(int(big_capacity), int(small_capacity))
+            st.caption(
+                f"Toplam filo kapasitesi: 2 × {int(big_capacity)} + 2 × {int(small_capacity)} = "
+                f"{2 * int(big_capacity) + 2 * int(small_capacity)} kişi."
+            )
+        else:
+            big_capacity = None
+            small_capacity = None
+            capacity = st.number_input(
+                "Araç kapasitesi",
+                min_value=1,
+                max_value=100,
+                value=45,
+                step=1,
+            )
+
         max_walk_m = st.slider(
             "Azami yürüme mesafesi",
             min_value=200,
@@ -1299,7 +1365,7 @@ with st.sidebar:
         <div class="sidebar-note">
             <strong>Çalışma düzeni</strong><br>
             Sabah hedef fabrika varışı 07.55 · Akşam çıkış 17.40 · Durak bekleme süresi 15 sn ·
-            Araç kapasitesi üst sınır olarak uygulanır; rota dolulukları eşitlenmez ve ihtiyaca göre farklı araç boyutları kullanılabilir.
+            Araç kapasitesi üst sınır olarak uygulanır; rota dolulukları eşitlenmez. Karma filo seçeneğinde 2 büyük ve 2 küçük araç baştan birlikte optimize edilir.
         </div>
         """,
         unsafe_allow_html=True,
@@ -1468,9 +1534,21 @@ if st.button(
 ):
     with st.spinner("Ortak duraklar seçiliyor ve rotalar birlikte optimize ediliyor..."):
         try:
-            mode = "fixed" if mode_label.startswith("Sabit") else "auto"
-            fixed_match = re.search(r"\d+", mode_label)
-            fixed_vehicle_count = int(fixed_match.group()) if fixed_match else 3
+            mixed_fleet = mode_label.startswith("2 Büyük")
+            mode = "fixed" if (mode_label.startswith("Sabit") or mixed_fleet) else "auto"
+            if mixed_fleet:
+                fixed_vehicle_count = 4
+                vehicle_capacities = [
+                    int(big_capacity),
+                    int(big_capacity),
+                    int(small_capacity),
+                    int(small_capacity),
+                ]
+            else:
+                fixed_match = re.search(r"\d+", mode_label)
+                fixed_vehicle_count = int(fixed_match.group()) if fixed_match else 3
+                vehicle_capacities = None
+
             direction = "morning" if direction_label.startswith("Sabah") else "evening"
             common_arguments = {
                 "employees": employees,
@@ -1486,6 +1564,7 @@ if st.button(
                 "use_road_network": bool(use_road_network),
                 "approved_candidates": st.session_state.get("approved_candidates", []),
                 "allow_automatic_candidates": allow_automatic_candidates,
+                "vehicle_capacities": vehicle_capacities,
             }
             if incremental_mode:
                 baseline_routes = read_previous_routes(previous_plan_source, employees)
@@ -1501,6 +1580,10 @@ if st.button(
             st.session_state["result_factory"] = (factory_lat, factory_lon, factory_address)
             st.session_state["result_direction"] = direction_label
             st.session_state["result_capacity"] = int(capacity)
+            st.session_state["result_vehicle_capacities"] = result_meta.get(
+                "route_capacities",
+                [int(capacity)] * int(result_meta.get("vehicle_count", fixed_vehicle_count)),
+            )
             st.session_state["result_max_walk_m"] = int(max_walk_m)
             st.session_state["result_target_average_walk_m"] = min(
                 int(target_average_walk_m), int(max_walk_m)
@@ -1563,7 +1646,15 @@ nonempty_routes = [route for route in shared_routes if route["occupancy"]]
 # Ekrandaki servis sayısı meta verideki nominal araç sayısı değil, gerçekten kullanılan rota sayısıdır.
 optimized_vehicle_count = len(nonempty_routes)
 result["vehicle_count"] = optimized_vehicle_count
-avg_fill = sum(route["occupancy"] for route in nonempty_routes) / (len(nonempty_routes) * result_capacity) if nonempty_routes else 0
+total_available_capacity = sum(
+    int(route.get("vehicle_capacity", result_capacity))
+    for route in nonempty_routes
+)
+avg_fill = (
+    sum(route["occupancy"] for route in nonempty_routes) / total_available_capacity
+    if nonempty_routes and total_available_capacity
+    else 0
+)
 route_loads = [int(route["occupancy"]) for route in nonempty_routes]
 load_spread = max(route_loads, default=0) - min(route_loads, default=0)
 total_stop_count = sum(len(route["stops"]) for route in nonempty_routes)
@@ -1603,7 +1694,11 @@ if len(route_loads) > 1:
         "Yolcu dağılımı: "
         + " · ".join(f"Rota {i + 1}: {load} kişi" for i, load in enumerate(route_loads))
         + f" · En yüksek–en düşük fark: {load_spread} kişi. "
-        "Araç kapasitesi üst sınırdır; rota doluluklarının birbirine eşit olması hedeflenmez."
+        + (
+            "Karma filoda her rota kendi araç kapasitesine göre çözülür; eşit yolcu dağılımı hedeflenmez."
+            if result.get("mixed_fleet")
+            else "Araç kapasitesi üst sınırdır; rota doluluklarının birbirine eşit olması hedeflenmez."
+        )
     )
 
 with st.expander("Teknik optimizasyon ayrıntıları", expanded=False):
@@ -1734,14 +1829,16 @@ st.pydeck_chart(deck, width="stretch")
 st.markdown("#### Rota detayları")
 st.caption("Sabah durak saatleri, fabrikaya 07:55 varış hedefinden OSRM segment süreleri ve 15 sn/durak bekleme ile geriye doğru hesaplanır.")
 for route in nonempty_routes:
-    route_fill = route["occupancy"] / result_capacity if result_capacity else 0
+    route_capacity = int(route.get("vehicle_capacity", result_capacity))
+    route_type = route.get("vehicle_type", "Standart servis")
+    route_fill = route["occupancy"] / route_capacity if route_capacity else 0
     st.markdown(
         f"""
         <div class="route-card">
             <div class="route-card-head">
-                <div class="route-title">Rota {route['vehicle_no']}</div>
+                <div class="route-title">Rota {route['vehicle_no']} · {route_type}</div>
                 <div class="route-occupancy">
-                    {route['occupancy']} / {result_capacity} yolcu · %{route_fill * 100:.0f} doluluk
+                    {route['occupancy']} / {route_capacity} yolcu · %{route_fill * 100:.0f} doluluk
                 </div>
             </div>
             <div class="route-stat-grid">
