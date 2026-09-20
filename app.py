@@ -21,7 +21,7 @@ from core import (
 )
 
 
-APP_VERSION = "2026.09.21-mixed-fleet-v6"
+APP_VERSION = "2026.09.21-mixed-fleet-v7"
 FIXED_TARGET_AVERAGE_WALK_M = 400
 FIXED_WAIT_SECONDS_PER_STOP = 15
 MORNING_FACTORY_ARRIVAL_SECONDS = 7 * 3600 + 55 * 60
@@ -810,6 +810,95 @@ def _split_routes_to_target_count(
     return result
 
 
+def _complete_mixed_fleet_routes(
+    routes: list[list[CommonStop]],
+    vehicle_capacities: list[int],
+    duration_matrix: list[list[float]],
+    wait_seconds_per_stop: int,
+    max_route_minutes: int,
+) -> list[list[CommonStop]]:
+    """Karma filoda boş aracı, coğrafi olarak ardışık bir rota parçasıyla devreye alır.
+
+    Araç kapasiteleri korunur. Yolcu sayıları eşitlenmez; yalnızca aşırı küçük
+    bir servis oluşmasını önlemek için araç kapasitesinin yaklaşık %35'i kadar
+    yumuşak bir alt doluluk tercihi kullanılır.
+    """
+    result = [list(route) for route in routes]
+    if len(result) != len(vehicle_capacities):
+        raise ValueError("Karma filo rota sayısı ile araç kapasitesi listesi uyuşmuyor.")
+
+    def load(route: list[CommonStop]) -> int:
+        return sum(stop.passenger_count for stop in route)
+
+    while any(not route for route in result):
+        empty_index = next(i for i, route in enumerate(result) if not route)
+        empty_capacity = int(vehicle_capacities[empty_index])
+        best = None
+
+        for source_index, source_route in enumerate(result):
+            if source_index == empty_index or len(source_route) < 2:
+                continue
+
+            source_capacity = int(vehicle_capacities[source_index])
+
+            for cut in range(1, len(source_route)):
+                left = source_route[:cut]
+                right = source_route[cut:]
+
+                for source_piece, new_piece in ((left, right), (right, left)):
+                    source_load = load(source_piece)
+                    new_load = load(new_piece)
+
+                    if source_load > source_capacity or new_load > empty_capacity:
+                        continue
+
+                    morning_times, evening_times = _same_route_directional_times(
+                        [source_piece, new_piece],
+                        duration_matrix,
+                        wait_seconds_per_stop,
+                    )
+                    directional_times = [*morning_times, *evening_times]
+                    worst_time = max(directional_times, default=0.0)
+
+                    if max_route_minutes and worst_time > max_route_minutes + 1e-9:
+                        continue
+
+                    source_soft_min = max(1, int(math.floor(source_capacity * 0.35)))
+                    new_soft_min = max(1, int(math.floor(empty_capacity * 0.35)))
+                    underload_penalty = (
+                        max(0, source_soft_min - source_load)
+                        + max(0, new_soft_min - new_load)
+                    )
+
+                    score = (
+                        underload_penalty,
+                        sum(directional_times),
+                        worst_time,
+                        -min(source_load, new_load),
+                        source_index,
+                        cut,
+                    )
+                    if best is None or score < best[0]:
+                        best = (
+                            score,
+                            source_index,
+                            source_piece,
+                            new_piece,
+                        )
+
+        if best is None:
+            raise ValueError(
+                "Karma filo için dört anlamlı rota oluşturulamadı. "
+                "Küçük servis kapasitesini artırmayı veya rota süresi sınırını yükseltmeyi deneyin."
+            )
+
+        _, source_index, source_piece, new_piece = best
+        result[source_index] = list(source_piece)
+        result[empty_index] = list(new_piece)
+
+    return result
+
+
 def _direction_limit_violation_text(
     morning_times: list[float],
     evening_times: list[float],
@@ -875,16 +964,18 @@ def build_shared_routes(
         walking_factor=1.20,
     )
 
-    # Aynı fiziksel durakta en büyük aracın kapasitesinden fazla kişi varsa
-    # durak aynı konum korunarak mantıksal parçalara ayrılır.
+    # Karma filoda bir fiziksel durak küçük aracın kapasitesinden kalabalıksa,
+    # aynı konum korunarak mantıksal yolcu gruplarına ayrılır. Böylece o nokta
+    # gerektiğinde iki farklı servis tarafından paylaşılabilir.
+    stop_chunk_capacity = min(vehicle_capacities) if mixed_fleet else capacity
     capacity_limited_stops: list[CommonStop] = []
     for stop in all_stops:
         pairs = list(zip(stop.member_indices, stop.walking_distances_m))
-        if len(pairs) <= capacity:
+        if len(pairs) <= stop_chunk_capacity:
             capacity_limited_stops.append(stop)
             continue
-        for chunk_start in range(0, len(pairs), capacity):
-            chunk = pairs[chunk_start : chunk_start + capacity]
+        for chunk_start in range(0, len(pairs), stop_chunk_capacity):
+            chunk = pairs[chunk_start : chunk_start + stop_chunk_capacity]
             capacity_limited_stops.append(
                 CommonStop(
                     anchor_index=stop.anchor_index,
@@ -941,16 +1032,18 @@ def build_shared_routes(
                 wait_seconds_per_stop=wait_seconds_per_stop,
                 max_route_minutes=max_route_minutes,
                 time_limit_seconds=30 if mixed_fleet else 15,
-                require_all_vehicles_active=mixed_fleet,
+                require_all_vehicles_active=False,
                 vehicle_capacities=vehicle_capacities if mixed_fleet else None,
             )
 
             if mixed_fleet:
-                active_candidate_routes = list(candidate_routes)
-                if len(active_candidate_routes) != 4 or any(not route for route in active_candidate_routes):
-                    raise ValueError(
-                        "2 büyük + 2 küçük servis planında dört aracın da aktif olduğu çözüm bulunamadı."
-                    )
+                active_candidate_routes = _complete_mixed_fleet_routes(
+                    list(candidate_routes),
+                    list(vehicle_capacities),
+                    duration_matrix,
+                    wait_seconds_per_stop,
+                    max_route_minutes,
+                )
             else:
                 active_candidate_routes = [route for route in candidate_routes if route]
                 if not active_candidate_routes and len(employees):
