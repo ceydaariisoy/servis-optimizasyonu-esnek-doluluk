@@ -1573,17 +1573,9 @@ def assign_common_stops_to_routes(
     )
 
     # Kapasite yalnızca üst sınırdır. Araçlardaki yolcu sayıları eşitlenmez.
-    # Sabit rota sayısı seçildiyse her seçilen servis en az bir ortak durağa
-    # hizmet eder; doluluklar coğrafi yapı ve rota maliyetine göre farklı olabilir.
-    if vehicle_count > len(stops):
-        raise ValueError(
-            f"{vehicle_count} aktif servis için yeterli sayıda ortak durak bulunmuyor. "
-            f"Mevcut ortak durak sayısı: {len(stops)}."
-        )
-    for vehicle_no in range(vehicle_count):
-        routing.solver().Add(
-            routing.NextVar(routing.Start(vehicle_no)) != routing.End(vehicle_no)
-        )
+    # OR-Tools ihtiyaç duyduğu araçları aktif kullanabilir; boş kalan araçlar
+    # sonuç aşamasında çıkarılır. Böylece sırf seçilen araç sayısını doldurmak
+    # için coğrafi olarak gereksiz rota oluşturulmaz.
 
     horizon_seconds = int(round(max_route_minutes * 60)) if max_route_minutes else 24 * 60 * 60
     routing.AddDimension(transit_callback, 0, max(1, horizon_seconds), True, "Time")
