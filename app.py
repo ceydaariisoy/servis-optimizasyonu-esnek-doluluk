@@ -21,7 +21,7 @@ from core import (
 )
 
 
-APP_VERSION = "2026.09.20-fixed-route-count-v4"
+APP_VERSION = "2026.09.20-practical-fixed-routes-v5"
 FIXED_TARGET_AVERAGE_WALK_M = 400
 FIXED_WAIT_SECONDS_PER_STOP = 15
 MORNING_FACTORY_ARRIVAL_SECONDS = 7 * 3600 + 55 * 60
@@ -717,16 +717,29 @@ def _split_routes_to_target_count(
     wait_seconds_per_stop: int,
     max_route_minutes: int,
 ) -> list[list[CommonStop]]:
-    """Sabit servis sayısını, rota sırasını bozmadan coğrafi/süre bazlı bölerek tamamlar.
+    """Sabit servis sayısını rota sırasını bozmadan tamamlar.
 
-    Yolcu sayısını eşitlemeye çalışmaz. Her adımda mevcut rotalardan birini iki
-    ardışık parçaya böler ve sabah/akşam süreleri açısından en uygun bölünmeyi seçer.
+    Yolcu sayıları eşitlenmez. Ancak sırf hedef rota sayısına ulaşmak için
+    5-6 kişilik çok düşük doluluklu bir servis oluşturmak da mümkün olduğunca
+    önlenir. Bu, eşitleme hedefi değil; operasyonel olarak anlamsız küçük
+    rotaları cezalandıran yumuşak bir kontroldür.
     """
     result = [list(route) for route in routes if route]
     if len(result) > target_count:
         raise ValueError(
             f"{target_count} sabit servis seçildi ancak {len(result)} aktif rota oluştu."
         )
+
+    total_passengers = sum(
+        stop.passenger_count
+        for route in result
+        for stop in route
+    )
+    average_target_load = total_passengers / max(1, target_count)
+
+    # Ortalama hedef doluluğun yaklaşık yarısının altına düşen rotalar
+    # yalnızca daha iyi bir coğrafi/süre çözümü yoksa kabul edilir.
+    practical_soft_min = max(1, int(math.floor(average_target_load * 0.50)))
 
     while len(result) < target_count:
         best = None
@@ -750,10 +763,32 @@ def _split_routes_to_target_count(
                 if max_route_minutes and worst_time > max_route_minutes + 1e-9:
                     continue
 
-                # Eşit yolcu dağılımı hedeflenmez. Karar yalnızca rota süresi
-                # ve mevcut güzergâh sırasının korunmasına göre verilir.
+                candidate_routes = [
+                    *result[:route_index],
+                    first,
+                    second,
+                    *result[route_index + 1 :],
+                ]
+                candidate_loads = [
+                    sum(stop.passenger_count for stop in candidate_route)
+                    for candidate_route in candidate_routes
+                ]
+
+                # Önce aşırı küçük servisleri cezalandır; bu sınır sağlandığında
+                # karar yine rota süresi/coğrafi maliyete göre verilir.
+                underload_penalty = sum(
+                    max(0, practical_soft_min - load)
+                    for load in candidate_loads
+                )
                 total_directional_time = sum(directional_times)
-                score = (worst_time, total_directional_time, route_index, cut)
+
+                score = (
+                    underload_penalty,
+                    total_directional_time,
+                    worst_time,
+                    route_index,
+                    cut,
+                )
 
                 if best is None or score < best[0]:
                     best = (score, route_index, first, second)
