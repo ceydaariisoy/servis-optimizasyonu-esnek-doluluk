@@ -1503,6 +1503,7 @@ def assign_common_stops_to_routes(
     max_route_minutes: float = 0,
     time_limit_seconds: int = 10,
     require_all_vehicles_active: bool = False,
+    vehicle_capacities: Sequence[int] | None = None,
 ) -> list[list[CommonStop]]:
     """Ortak durakları OR-Tools kapasite kısıtlı araç rotalama modeliyle dağıtır.
 
@@ -1516,17 +1517,33 @@ def assign_common_stops_to_routes(
         raise ValueError("Araç sayısı en az 1 olmalıdır.")
     if capacity <= 0:
         raise ValueError("Araç kapasitesi sıfırdan büyük olmalıdır.")
+
+    if vehicle_capacities is None:
+        effective_capacities = [int(capacity)] * vehicle_count
+    else:
+        effective_capacities = [int(value) for value in vehicle_capacities]
+        if len(effective_capacities) != vehicle_count:
+            raise ValueError(
+                "Araç kapasitesi listesi ile araç sayısı aynı uzunlukta olmalıdır."
+            )
+        if any(value <= 0 for value in effective_capacities):
+            raise ValueError("Tüm araç kapasiteleri sıfırdan büyük olmalıdır.")
+
     employee_count = sum(stop.passenger_count for stop in stops)
-    if employee_count > vehicle_count * capacity:
+    total_capacity = sum(effective_capacities)
+    if employee_count > total_capacity:
         raise ValueError(
-            f"Kapasite yetersiz: {employee_count} çalışan için en az "
-            f"{math.ceil(employee_count / capacity)} araç gerekir."
+            f"Kapasite yetersiz: {employee_count} çalışan için toplam "
+            f"{total_capacity} kişilik araç kapasitesi bulunuyor."
         )
     if not stops:
         return [[] for _ in range(vehicle_count)]
 
-    if any(stop.passenger_count > capacity for stop in stops):
-        raise ValueError("Bir ortak durağın yolcu sayısı araç kapasitesini aşıyor.")
+    max_vehicle_capacity = max(effective_capacities)
+    if any(stop.passenger_count > max_vehicle_capacity for stop in stops):
+        raise ValueError(
+            "Bir ortak durağın yolcu sayısı en büyük araç kapasitesini aşıyor."
+        )
 
     # Yerel düğümler: 0=fabrika, 1..N=ortak durak, son düğüm=serbest başlangıç/bitiş.
     stop_matrix_indices = [
@@ -1568,7 +1585,7 @@ def assign_common_stops_to_routes(
     routing.AddDimensionWithVehicleCapacity(
         demand_callback,
         0,
-        [capacity] * vehicle_count,
+        effective_capacities,
         True,
         "Capacity",
     )
@@ -1586,6 +1603,16 @@ def assign_common_stops_to_routes(
         for vehicle_no in range(vehicle_count):
             routing.solver().Add(
                 routing.NextVar(routing.Start(vehicle_no)) != routing.End(vehicle_no)
+            )
+
+    if vehicle_capacities is not None:
+        capacity_dimension = routing.GetDimensionOrDie("Capacity")
+        for vehicle_no, vehicle_capacity in enumerate(effective_capacities):
+            soft_minimum = max(1, int(math.floor(vehicle_capacity * 0.40)))
+            capacity_dimension.SetCumulVarSoftLowerBound(
+                routing.End(vehicle_no),
+                soft_minimum,
+                500,
             )
 
     horizon_seconds = int(round(max_route_minutes * 60)) if max_route_minutes else 24 * 60 * 60
