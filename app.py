@@ -21,7 +21,7 @@ from core import (
 )
 
 
-APP_VERSION = "2026.09.20-flexible-route-load-v2"
+APP_VERSION = "2026.09.20-fixed-route-count-v3"
 FIXED_TARGET_AVERAGE_WALK_M = 400
 FIXED_WAIT_SECONDS_PER_STOP = 15
 MORNING_FACTORY_ARRIVAL_SECONDS = 7 * 3600 + 55 * 60
@@ -832,12 +832,19 @@ def build_shared_routes(
                 wait_seconds_per_stop=wait_seconds_per_stop,
                 max_route_minutes=max_route_minutes,
                 time_limit_seconds=15,
+                require_all_vehicles_active=(mode == "fixed"),
             )
 
-            # Boş araçlar servis değildir. Bunları hemen çıkarıp gerçek rota sayısını kullanıyoruz.
+            # Otomatik modda boş araçlar sonuçtan çıkarılır. Sabit modda ise
+            # seçilen servis sayısının tamamı aktif olmak zorundadır.
             active_candidate_routes = [route for route in candidate_routes if route]
             if not active_candidate_routes and len(employees):
                 raise ValueError("Optimizasyon aktif bir servis rotası üretemedi.")
+            if mode == "fixed" and len(active_candidate_routes) != int(fixed_vehicle_count):
+                raise ValueError(
+                    f"Sabit {fixed_vehicle_count} servis seçildi ancak "
+                    f"{len(active_candidate_routes)} aktif rota üretildi."
+                )
 
             morning_times, evening_times = _same_route_directional_times(
                 active_candidate_routes,
