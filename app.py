@@ -21,7 +21,7 @@ from core import (
 )
 
 
-APP_VERSION = "2026.09.20-fixed-route-count-v3"
+APP_VERSION = "2026.09.20-fixed-route-count-v4"
 FIXED_TARGET_AVERAGE_WALK_M = 400
 FIXED_WAIT_SECONDS_PER_STOP = 15
 MORNING_FACTORY_ARRIVAL_SECONDS = 7 * 3600 + 55 * 60
@@ -710,6 +710,71 @@ def _same_route_directional_times(
     return morning_times, evening_times
 
 
+def _split_routes_to_target_count(
+    routes: list[list[CommonStop]],
+    target_count: int,
+    duration_matrix: list[list[float]],
+    wait_seconds_per_stop: int,
+    max_route_minutes: int,
+) -> list[list[CommonStop]]:
+    """Sabit servis sayısını, rota sırasını bozmadan coğrafi/süre bazlı bölerek tamamlar.
+
+    Yolcu sayısını eşitlemeye çalışmaz. Her adımda mevcut rotalardan birini iki
+    ardışık parçaya böler ve sabah/akşam süreleri açısından en uygun bölünmeyi seçer.
+    """
+    result = [list(route) for route in routes if route]
+    if len(result) > target_count:
+        raise ValueError(
+            f"{target_count} sabit servis seçildi ancak {len(result)} aktif rota oluştu."
+        )
+
+    while len(result) < target_count:
+        best = None
+
+        for route_index, route in enumerate(result):
+            if len(route) < 2:
+                continue
+
+            for cut in range(1, len(route)):
+                first = route[:cut]
+                second = route[cut:]
+
+                morning_times, evening_times = _same_route_directional_times(
+                    [first, second],
+                    duration_matrix,
+                    wait_seconds_per_stop,
+                )
+                directional_times = [*morning_times, *evening_times]
+                worst_time = max(directional_times, default=0.0)
+
+                if max_route_minutes and worst_time > max_route_minutes + 1e-9:
+                    continue
+
+                # Eşit yolcu dağılımı hedeflenmez. Karar yalnızca rota süresi
+                # ve mevcut güzergâh sırasının korunmasına göre verilir.
+                total_directional_time = sum(directional_times)
+                score = (worst_time, total_directional_time, route_index, cut)
+
+                if best is None or score < best[0]:
+                    best = (score, route_index, first, second)
+
+        if best is None:
+            raise ValueError(
+                f"Mevcut rotalar {target_count} aktif servise, "
+                f"{max_route_minutes} dk sınırı korunarak bölünemedi."
+            )
+
+        _, route_index, first, second = best
+        result = [
+            *result[:route_index],
+            first,
+            second,
+            *result[route_index + 1 :],
+        ]
+
+    return result
+
+
 def _direction_limit_violation_text(
     morning_times: list[float],
     evening_times: list[float],
@@ -832,18 +897,23 @@ def build_shared_routes(
                 wait_seconds_per_stop=wait_seconds_per_stop,
                 max_route_minutes=max_route_minutes,
                 time_limit_seconds=15,
-                require_all_vehicles_active=(mode == "fixed"),
+                require_all_vehicles_active=False,
             )
 
-            # Otomatik modda boş araçlar sonuçtan çıkarılır. Sabit modda ise
-            # seçilen servis sayısının tamamı aktif olmak zorundadır.
+            # OR-Tools boş bırakabildiği araçları sonuçtan çıkarır. Sabit servis
+            # sayısı seçilmişse eksik aktif rota sayısı, mevcut rota sırasını
+            # koruyan süre-bazlı bölmelerle tamamlanır. Yolcu sayıları eşitlenmez.
             active_candidate_routes = [route for route in candidate_routes if route]
             if not active_candidate_routes and len(employees):
                 raise ValueError("Optimizasyon aktif bir servis rotası üretemedi.")
-            if mode == "fixed" and len(active_candidate_routes) != int(fixed_vehicle_count):
-                raise ValueError(
-                    f"Sabit {fixed_vehicle_count} servis seçildi ancak "
-                    f"{len(active_candidate_routes)} aktif rota üretildi."
+
+            if mode == "fixed":
+                active_candidate_routes = _split_routes_to_target_count(
+                    active_candidate_routes,
+                    int(fixed_vehicle_count),
+                    duration_matrix,
+                    wait_seconds_per_stop,
+                    max_route_minutes,
                 )
 
             morning_times, evening_times = _same_route_directional_times(
