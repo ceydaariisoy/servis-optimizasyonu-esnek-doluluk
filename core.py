@@ -1608,11 +1608,15 @@ def assign_common_stops_to_routes(
     if vehicle_capacities is not None:
         capacity_dimension = routing.GetDimensionOrDie("Capacity")
         for vehicle_no, vehicle_capacity in enumerate(effective_capacities):
-            soft_minimum = max(1, int(math.floor(vehicle_capacity * 0.35)))
+            # Karma filoda hiçbir aracı eşit doluluğa zorlamıyoruz; ancak özellikle
+            # küçük servislerin 8-9 kişi gibi çok düşük dolulukta kalmasını
+            # operasyonel olarak caydırıyoruz. Yaklaşık %50 doluluk yalnızca
+            # yumuşak bir hedeftir; coğrafya/süre gerektirirse altına inebilir.
+            soft_minimum = max(1, int(math.floor(vehicle_capacity * 0.50)))
             capacity_dimension.SetCumulVarSoftLowerBound(
                 routing.End(vehicle_no),
                 soft_minimum,
-                5000,
+                20000,
             )
 
     horizon_seconds = int(round(max_route_minutes * 60)) if max_route_minutes else 24 * 60 * 60
