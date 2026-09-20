@@ -1608,11 +1608,11 @@ def assign_common_stops_to_routes(
     if vehicle_capacities is not None:
         capacity_dimension = routing.GetDimensionOrDie("Capacity")
         for vehicle_no, vehicle_capacity in enumerate(effective_capacities):
-            soft_minimum = max(1, int(math.floor(vehicle_capacity * 0.40)))
+            soft_minimum = max(1, int(math.floor(vehicle_capacity * 0.35)))
             capacity_dimension.SetCumulVarSoftLowerBound(
                 routing.End(vehicle_no),
                 soft_minimum,
-                500,
+                5000,
             )
 
     horizon_seconds = int(round(max_route_minutes * 60)) if max_route_minutes else 24 * 60 * 60
