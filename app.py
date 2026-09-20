@@ -21,7 +21,7 @@ from core import (
 )
 
 
-APP_VERSION = "2026.09.21-corridor-shape-v11"
+APP_VERSION = "2026.09.21-route-shape-v10"
 FIXED_TARGET_AVERAGE_WALK_M = 400
 FIXED_WAIT_SECONDS_PER_STOP = 15
 MORNING_FACTORY_ARRIVAL_SECONDS = 7 * 3600 + 55 * 60
@@ -1031,7 +1031,7 @@ def build_shared_routes(
                 planning_direction,
                 wait_seconds_per_stop=wait_seconds_per_stop,
                 max_route_minutes=max_route_minutes,
-                time_limit_seconds=45 if mixed_fleet else 15,
+                time_limit_seconds=30 if mixed_fleet else 15,
                 require_all_vehicles_active=False,
                 vehicle_capacities=vehicle_capacities if mixed_fleet else None,
             )
@@ -1458,7 +1458,7 @@ with st.sidebar:
         <div class="sidebar-note">
             <strong>Çalışma düzeni</strong><br>
             Sabah hedef fabrika varışı 07.55 · Akşam çıkış 17.40 · Durak bekleme süresi 15 sn ·
-            Araç kapasitesi üst sınır olarak uygulanır; rota dolulukları eşitlenmez. Karma filo seçeneğinde 2 büyük ve 2 küçük araç birlikte optimize edilir; aşırı düşük doluluk, geri dönüş ve gereksiz yanlamasına zikzaklar yumuşak ceza ile azaltılır.
+            Araç kapasitesi üst sınır olarak uygulanır; rota dolulukları eşitlenmez. Karma filo seçeneğinde 2 büyük ve 2 küçük araç birlikte optimize edilir; aşırı düşük doluluk ve fabrikadan gereksiz uzaklaşan zikzaklar yumuşak ceza ile azaltılır.
         </div>
         """,
         unsafe_allow_html=True,
