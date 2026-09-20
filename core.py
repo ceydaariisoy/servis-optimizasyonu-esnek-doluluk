@@ -1565,6 +1565,7 @@ def assign_common_stops_to_routes(
         return None
 
     def travel_seconds(from_index: int, to_index: int) -> int:
+        """Gerçek sürüş + durak hizmet süresi. Süre kısıtı yalnızca bunu kullanır."""
         from_node = manager.IndexToNode(from_index)
         to_node = manager.IndexToNode(to_index)
         from_full = full_matrix_index(from_node)
@@ -1574,7 +1575,40 @@ def assign_common_stops_to_routes(
         return max(0, int(round(drive + service)))
 
     transit_callback = routing.RegisterTransitCallback(travel_seconds)
-    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback)
+
+    def route_cost_seconds(from_index: int, to_index: int) -> int:
+        """Gerçek süreye yalnızca optimizasyon amaçlı geri-dönüş cezası ekler.
+
+        Sabah rotasında araç genel olarak fabrikaya yaklaşmalıdır. Bir sonraki
+        durağa geçerken fabrikadan yeniden uzaklaşılıyorsa maliyete ek ceza
+        yazılır. Bu ceza Time dimension'a girmez; dolayısıyla ekranda görülen
+        rota süresi ve azami süre kontrolü gerçek OSRM süresidir.
+        """
+        actual = travel_seconds(from_index, to_index)
+        from_node = manager.IndexToNode(from_index)
+        to_node = manager.IndexToNode(to_index)
+        from_full = full_matrix_index(from_node)
+        to_full = full_matrix_index(to_node)
+
+        if from_full is None or to_full is None:
+            return actual
+
+        if direction == "morning":
+            from_factory_distance = float(distance_matrix[from_full][0])
+            to_factory_distance = float(distance_matrix[to_full][0])
+            wrong_way_m = max(0.0, to_factory_distance - from_factory_distance)
+        else:
+            from_factory_distance = float(distance_matrix[0][from_full])
+            to_factory_distance = float(distance_matrix[0][to_full])
+            wrong_way_m = max(0.0, from_factory_distance - to_factory_distance)
+
+        # 1 km ters yön yaklaşık 2 dakika ek optimizasyon maliyeti yaratır.
+        # Ama gerçek rota süresini değiştirmez.
+        backtrack_penalty = int(round(wrong_way_m * 0.12))
+        return actual + backtrack_penalty
+
+    cost_callback = routing.RegisterTransitCallback(route_cost_seconds)
+    routing.SetArcCostEvaluatorOfAllVehicles(cost_callback)
 
     demands = [0, *(stop.passenger_count for stop in stops), 0]
 
