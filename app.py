@@ -21,7 +21,7 @@ from core import (
 )
 
 
-APP_VERSION = "2026.09.21-mixed-fleet-v7"
+APP_VERSION = "2026.09.21-mixed-fleet-v8"
 FIXED_TARGET_AVERAGE_WALK_M = 400
 FIXED_WAIT_SECONDS_PER_STOP = 15
 MORNING_FACTORY_ARRIVAL_SECONDS = 7 * 3600 + 55 * 60
@@ -863,8 +863,8 @@ def _complete_mixed_fleet_routes(
                     if max_route_minutes and worst_time > max_route_minutes + 1e-9:
                         continue
 
-                    source_soft_min = max(1, int(math.floor(source_capacity * 0.35)))
-                    new_soft_min = max(1, int(math.floor(empty_capacity * 0.35)))
+                    source_soft_min = max(1, int(math.floor(source_capacity * 0.50)))
+                    new_soft_min = max(1, int(math.floor(empty_capacity * 0.50)))
                     underload_penalty = (
                         max(0, source_soft_min - source_load)
                         + max(0, new_soft_min - new_load)
@@ -1458,7 +1458,7 @@ with st.sidebar:
         <div class="sidebar-note">
             <strong>Çalışma düzeni</strong><br>
             Sabah hedef fabrika varışı 07.55 · Akşam çıkış 17.40 · Durak bekleme süresi 15 sn ·
-            Araç kapasitesi üst sınır olarak uygulanır; rota dolulukları eşitlenmez. Karma filo seçeneğinde 2 büyük ve 2 küçük araç baştan birlikte optimize edilir.
+            Araç kapasitesi üst sınır olarak uygulanır; rota dolulukları eşitlenmez. Karma filo seçeneğinde 2 büyük ve 2 küçük araç baştan birlikte optimize edilir; aşırı düşük doluluklu araçlar yumuşak ceza ile azaltılır.
         </div>
         """,
         unsafe_allow_html=True,
