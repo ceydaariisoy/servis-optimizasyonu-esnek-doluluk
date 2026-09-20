@@ -21,7 +21,7 @@ from core import (
 )
 
 
-APP_VERSION = "2026.09.20-flexible-route-load-v1"
+APP_VERSION = "2026.09.20-flexible-route-load-v2"
 FIXED_TARGET_AVERAGE_WALK_M = 400
 FIXED_WAIT_SECONDS_PER_STOP = 15
 MORNING_FACTORY_ARRIVAL_SECONDS = 7 * 3600 + 55 * 60
@@ -767,6 +767,31 @@ def build_shared_routes(
         target_average_walk_m=target_average_walk_m,
         walking_factor=1.20,
     )
+
+    # Bir fiziksel durakta araç kapasitesinden fazla çalışan toplanmışsa,
+    # aynı durağı kapasiteye uygun mantıksal parçalara ayır. Böylece örneğin
+    # aynı noktadaki 60 çalışan iki farklı servis tarafından alınabilir.
+    capacity_limited_stops: list[CommonStop] = []
+    for stop in all_stops:
+        pairs = list(zip(stop.member_indices, stop.walking_distances_m))
+        if len(pairs) <= capacity:
+            capacity_limited_stops.append(stop)
+            continue
+        for start in range(0, len(pairs), capacity):
+            chunk = pairs[start : start + capacity]
+            capacity_limited_stops.append(
+                CommonStop(
+                    anchor_index=stop.anchor_index,
+                    member_indices=[pair[0] for pair in chunk],
+                    walking_distances_m=[pair[1] for pair in chunk],
+                    latitude=stop.latitude,
+                    longitude=stop.longitude,
+                    label=stop.label,
+                    source=stop.source,
+                )
+            )
+    all_stops = capacity_limited_stops
+
     route_coordinates = [
         factory_coordinates,
         *((float(stop.latitude), float(stop.longitude)) for stop in all_stops),
@@ -845,10 +870,11 @@ def build_shared_routes(
             vehicle_count += 1
     else:
         detail = f" Son kontrol: {last_direction_violation}." if last_direction_violation else ""
+        last_error_text = f" Teknik neden: {last_error}" if last_error else ""
         raise ValueError(
             f"Kapasite ve {max_route_minutes} dk sabah/akşam rota süresi sınırlarını "
-            f"birlikte sağlayan çözüm bulunamadı.{detail} "
-            "Araç kapasitesini veya durak yapısını kontrol edin."
+            f"birlikte sağlayan çözüm bulunamadı.{detail}{last_error_text} "
+            "Araç kapasitesini, rota süresini veya durak yapısını kontrol edin."
         ) from last_error
 
     # Nihai süreleri aktif sabah rota grupları üzerinden sakla.
