@@ -1502,6 +1502,7 @@ def assign_common_stops_to_routes(
     wait_seconds_per_stop: int = 15,
     max_route_minutes: float = 0,
     time_limit_seconds: int = 10,
+    require_all_vehicles_active: bool = False,
 ) -> list[list[CommonStop]]:
     """Ortak durakları OR-Tools kapasite kısıtlı araç rotalama modeliyle dağıtır.
 
@@ -1572,10 +1573,20 @@ def assign_common_stops_to_routes(
         "Capacity",
     )
 
-    # Kapasite yalnızca üst sınırdır. Araçlardaki yolcu sayıları eşitlenmez.
-    # OR-Tools ihtiyaç duyduğu araçları aktif kullanabilir; boş kalan araçlar
-    # sonuç aşamasında çıkarılır. Böylece sırf seçilen araç sayısını doldurmak
-    # için coğrafi olarak gereksiz rota oluşturulmaz.
+    # Kapasite yalnızca üst sınırdır; yolcu sayıları eşitlenmez.
+    # Sabit rota sayısı seçildiğinde ise kullanıcının seçtiği her servis aktif
+    # olmalıdır. Bu yalnızca "rota boş kalmasın" kısıtıdır; araç doluluklarını
+    # birbirine yaklaştıran herhangi bir hedef/ceza uygulanmaz.
+    if require_all_vehicles_active:
+        if vehicle_count > len(stops):
+            raise ValueError(
+                f"Sabit {vehicle_count} servis için en az {vehicle_count} ayrı durak/grup gerekir; "
+                f"mevcut rota düğümü sayısı {len(stops)}."
+            )
+        for vehicle_no in range(vehicle_count):
+            routing.solver().Add(
+                routing.NextVar(routing.Start(vehicle_no)) != routing.End(vehicle_no)
+            )
 
     horizon_seconds = int(round(max_route_minutes * 60)) if max_route_minutes else 24 * 60 * 60
     routing.AddDimension(transit_callback, 0, max(1, horizon_seconds), True, "Time")
