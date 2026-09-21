@@ -21,7 +21,7 @@ from core import (
 )
 
 
-APP_VERSION = "2026.09.21-isolated-stop-v13"
+APP_VERSION = "2026.09.21-regional-flex4-reference-v1"
 FIXED_TARGET_AVERAGE_WALK_M = 400
 FIXED_WAIT_SECONDS_PER_STOP = 15
 MORNING_FACTORY_ARRIVAL_SECONDS = 7 * 3600 + 55 * 60
@@ -899,6 +899,53 @@ def _complete_mixed_fleet_routes(
     return result
 
 
+def _reference_four_load_targets(employee_count: int, capacity: int) -> list[int]:
+    """Dört rota için iki yoğun + iki kompakt referans doluluk hedefi üretir.
+
+    109 çalışan ve 45 kişilik araçta hedef yaklaşık 37-18-17-37 olur.
+    Hedefler sert kısıt değildir; coğrafi bütünlük ve süre gerektiğinde esneyebilir.
+    """
+    if employee_count <= 0:
+        return [0, 0, 0, 0]
+    if capacity <= 0:
+        raise ValueError("Araç kapasitesi sıfırdan büyük olmalıdır.")
+    if employee_count > 4 * capacity:
+        raise ValueError(
+            f"{employee_count} çalışan 4 × {capacity} kişilik kapasiteye sığmıyor."
+        )
+
+    ratios = [0.34, 0.165, 0.155, 0.34]
+    raw = [employee_count * ratio for ratio in ratios]
+    targets = [min(capacity, int(math.floor(value))) for value in raw]
+
+    remaining = employee_count - sum(targets)
+    fractional_order = sorted(
+        range(4),
+        key=lambda index: (raw[index] - math.floor(raw[index]), ratios[index]),
+        reverse=True,
+    )
+    cursor = 0
+    while remaining > 0:
+        index = fractional_order[cursor % 4]
+        if targets[index] < capacity:
+            targets[index] += 1
+            remaining -= 1
+        cursor += 1
+        if cursor > 1000:
+            raise ValueError("Referans rota dolulukları kapasiteye yerleştirilemedi.")
+
+    # Çok küçük veri setlerinde boş rota hedefi oluşmasın.
+    if employee_count >= 4:
+        for index in range(4):
+            if targets[index] > 0:
+                continue
+            donor = max(range(4), key=lambda j: targets[j])
+            if targets[donor] > 1:
+                targets[donor] -= 1
+                targets[index] += 1
+    return targets
+
+
 def _direction_limit_violation_text(
     morning_times: list[float],
     evening_times: list[float],
@@ -928,6 +975,7 @@ def build_shared_routes(
     approved_candidates: list[tuple],
     allow_automatic_candidates: bool,
     vehicle_capacities: list[int] | None = None,
+    target_vehicle_loads: list[int] | None = None,
 ):
     """Ortak durakları ve servis rotalarını oluşturur."""
     employee_coordinates = list(
@@ -935,6 +983,20 @@ def build_shared_routes(
     )
 
     mixed_fleet = bool(vehicle_capacities)
+    reference_four_profile = bool(target_vehicle_loads)
+    if reference_four_profile:
+        target_vehicle_loads = [int(value) for value in target_vehicle_loads]
+        if len(target_vehicle_loads) != 4:
+            raise ValueError("Bölgesel/esnek 4 servis modu için 4 doluluk hedefi gerekir.")
+        fixed_vehicle_count = 4
+        mode = "fixed"
+        if sum(target_vehicle_loads) != len(employees):
+            raise ValueError(
+                "Bölgesel/esnek 4 servis doluluk hedeflerinin toplamı çalışan sayısıyla uyuşmuyor."
+            )
+        if max(target_vehicle_loads, default=0) > int(capacity):
+            raise ValueError("Referans doluluk hedeflerinden biri araç kapasitesini aşıyor.")
+
     if mixed_fleet:
         vehicle_capacities = [int(value) for value in vehicle_capacities]
         if len(vehicle_capacities) != 4:
@@ -1032,8 +1094,9 @@ def build_shared_routes(
                 wait_seconds_per_stop=wait_seconds_per_stop,
                 max_route_minutes=max_route_minutes,
                 time_limit_seconds=30 if mixed_fleet else 15,
-                require_all_vehicles_active=False,
+                require_all_vehicles_active=reference_four_profile,
                 vehicle_capacities=vehicle_capacities if mixed_fleet else None,
+                target_vehicle_loads=target_vehicle_loads if reference_four_profile else None,
             )
 
             if mixed_fleet:
@@ -1048,13 +1111,17 @@ def build_shared_routes(
                 active_candidate_routes = [route for route in candidate_routes if route]
                 if not active_candidate_routes and len(employees):
                     raise ValueError("Optimizasyon aktif bir servis rotası üretemedi.")
-                if mode == "fixed":
+                if mode == "fixed" and not reference_four_profile:
                     active_candidate_routes = _split_routes_to_target_count(
                         active_candidate_routes,
                         int(fixed_vehicle_count),
                         duration_matrix,
                         wait_seconds_per_stop,
                         max_route_minutes,
+                    )
+                elif reference_four_profile and len(active_candidate_routes) != 4:
+                    raise ValueError(
+                        "Bölgesel/esnek 4 servis modu dört aktif rota oluşturamadı."
                     )
 
             morning_times, evening_times = _same_route_directional_times(
@@ -1145,6 +1212,8 @@ def build_shared_routes(
         "route_capacities": route_capacities,
         "route_types": route_types,
         "mixed_fleet": mixed_fleet,
+        "reference_four_profile": reference_four_profile,
+        "target_vehicle_loads": list(target_vehicle_loads or []),
         "load_spread": (
             max((sum(stop.passenger_count for stop in route) for route in allocated_routes), default=0)
             - min((sum(stop.passenger_count for stop in route) for route in allocated_routes), default=0)
@@ -1176,8 +1245,13 @@ def build_incremental_shared_routes(
     approved_candidates: list[tuple],
     allow_automatic_candidates: bool,
     vehicle_capacities: list[int] | None = None,
+    target_vehicle_loads: list[int] | None = None,
 ):
     """Mevcut planı günceller; rota grubu geliş/dönüşte aynı kalır."""
+    if target_vehicle_loads:
+        raise ValueError(
+            "Bölgesel/esnek 4 servis modu için 'Tam optimizasyon' seçilmelidir."
+        )
     if vehicle_capacities:
         raise ValueError(
             "2 Büyük + 2 Küçük servis planı için 'Tam optimizasyon' seçilmelidir."
@@ -1354,6 +1428,7 @@ with st.sidebar:
                 "Otomatik (kapasite + süreye göre)",
                 "Sabit 3 servis",
                 "Sabit 4 servis",
+                "Sabit 4 servis – bölgesel/esnek doluluk",
                 "2 Büyük + 2 Küçük servis",
             ],
         )
@@ -1458,7 +1533,7 @@ with st.sidebar:
         <div class="sidebar-note">
             <strong>Çalışma düzeni</strong><br>
             Sabah hedef fabrika varışı 07.55 · Akşam çıkış 17.40 · Durak bekleme süresi 15 sn ·
-            Araç kapasitesi üst sınır olarak uygulanır; rota dolulukları eşitlenmez. Karma filo seçeneğinde 2 büyük ve 2 küçük araç birlikte optimize edilir; aşırı düşük doluluk, geri dönüş, bölge sıçraması ve izole uzun durak bağlantıları yumuşak ceza ile azaltılır.
+            Araç kapasitesi üst sınır olarak uygulanır; rota dolulukları eşitlenmez. "Bölgesel/esnek 4 servis" seçeneği iki yoğun + iki kompakt rota profilini yumuşak hedef olarak kullanır; coğrafi bütünlük ve süre hedefin önündedir. Karma filo seçeneğinde 2 büyük ve 2 küçük araç birlikte optimize edilir; aşırı düşük doluluk, geri dönüş, bölge sıçraması ve izole uzun durak bağlantıları yumuşak ceza ile azaltılır.
         </div>
         """,
         unsafe_allow_html=True,
@@ -1628,6 +1703,7 @@ if st.button(
     with st.spinner("Ortak duraklar seçiliyor ve rotalar birlikte optimize ediliyor..."):
         try:
             mixed_fleet = mode_label.startswith("2 Büyük")
+            regional_flex_four = mode_label.startswith("Sabit 4 servis – bölgesel")
             mode = "fixed" if (mode_label.startswith("Sabit") or mixed_fleet) else "auto"
             if mixed_fleet:
                 fixed_vehicle_count = 4
@@ -1641,6 +1717,12 @@ if st.button(
                 fixed_match = re.search(r"\d+", mode_label)
                 fixed_vehicle_count = int(fixed_match.group()) if fixed_match else 3
                 vehicle_capacities = None
+
+            target_vehicle_loads = (
+                _reference_four_load_targets(len(employees), int(capacity))
+                if regional_flex_four
+                else None
+            )
 
             direction = "morning" if direction_label.startswith("Sabah") else "evening"
             common_arguments = {
@@ -1658,6 +1740,7 @@ if st.button(
                 "approved_candidates": st.session_state.get("approved_candidates", []),
                 "allow_automatic_candidates": allow_automatic_candidates,
                 "vehicle_capacities": vehicle_capacities,
+                "target_vehicle_loads": target_vehicle_loads,
             }
             if incremental_mode:
                 baseline_routes = read_previous_routes(previous_plan_source, employees)
