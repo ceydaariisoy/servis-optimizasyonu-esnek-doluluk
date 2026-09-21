@@ -21,7 +21,7 @@ from core import (
 )
 
 
-APP_VERSION = "2026.09.21-route-shape-v10"
+APP_VERSION = "2026.09.21-regional-compactness-v12"
 FIXED_TARGET_AVERAGE_WALK_M = 400
 FIXED_WAIT_SECONDS_PER_STOP = 15
 MORNING_FACTORY_ARRIVAL_SECONDS = 7 * 3600 + 55 * 60
@@ -1458,7 +1458,7 @@ with st.sidebar:
         <div class="sidebar-note">
             <strong>Çalışma düzeni</strong><br>
             Sabah hedef fabrika varışı 07.55 · Akşam çıkış 17.40 · Durak bekleme süresi 15 sn ·
-            Araç kapasitesi üst sınır olarak uygulanır; rota dolulukları eşitlenmez. Karma filo seçeneğinde 2 büyük ve 2 küçük araç birlikte optimize edilir; aşırı düşük doluluk ve fabrikadan gereksiz uzaklaşan zikzaklar yumuşak ceza ile azaltılır.
+            Araç kapasitesi üst sınır olarak uygulanır; rota dolulukları eşitlenmez. Karma filo seçeneğinde 2 büyük ve 2 küçük araç birlikte optimize edilir; aşırı düşük doluluk, geri dönüş ve rotanın farklı bölgelere gereksiz sıçraması yumuşak ceza ile azaltılır.
         </div>
         """,
         unsafe_allow_html=True,
