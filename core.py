@@ -1564,6 +1564,22 @@ def assign_common_stops_to_routes(
             return stop_matrix_indices[local_node - 1]
         return None
 
+    # Fabrika merkezli açı/radyus bilgileri bir kez hesaplanır. Böylece
+    # optimizasyon sırasında sürekli trigonometrik hesap yapılmaz.
+    factory_lat, factory_lon = coordinates[0]
+    factory_angles: list[float | None] = []
+    factory_radii_km: list[float] = []
+    for point_index, (lat, lon) in enumerate(coordinates):
+        if point_index == 0:
+            factory_angles.append(None)
+            factory_radii_km.append(0.0)
+            continue
+        mean_lat_rad = math.radians((factory_lat + lat) / 2.0)
+        x = math.radians(lon - factory_lon) * math.cos(mean_lat_rad)
+        y = math.radians(lat - factory_lat)
+        factory_angles.append(math.atan2(y, x))
+        factory_radii_km.append(haversine_km((factory_lat, factory_lon), (lat, lon)))
+
     def travel_seconds(from_index: int, to_index: int) -> int:
         """Gerçek sürüş + durak hizmet süresi. Süre kısıtı yalnızca bunu kullanır."""
         from_node = manager.IndexToNode(from_index)
@@ -1612,7 +1628,32 @@ def assign_common_stops_to_routes(
         # maliyeti verilir. Bu değer yalnızca rota seçimini etkiler;
         # gerçek süre kısıtı transit_callback üzerinden hesaplanmaya devam eder.
         backtrack_penalty = int(round(wrong_way_seconds * 1.5))
-        return actual + backtrack_penalty
+
+        # Bölgesel bütünlük cezası:
+        # Fabrika çevresinde çok farklı açılardaki iki durağı peş peşe bağlamak,
+        # özellikle dış mahallelerde rotanın başka bir bölgeye sıçramasına neden
+        # olabilir. 40 derecenin üzerindeki yön değişimleri hafifçe cezalandırılır.
+        # Merkeze yakın noktalarda açı anlamını yitirdiği için ceza otomatik azalır.
+        regional_penalty = 0
+        if from_full != 0 and to_full != 0:
+            from_angle = factory_angles[from_full]
+            to_angle = factory_angles[to_full]
+            if from_angle is not None and to_angle is not None:
+                angular_diff = abs(from_angle - to_angle)
+                angular_diff = min(angular_diff, 2 * math.pi - angular_diff)
+                excess_angle = max(0.0, angular_diff - math.radians(40.0))
+
+                outer_radius_km = min(
+                    factory_radii_km[from_full],
+                    factory_radii_km[to_full],
+                )
+                radius_weight = min(1.0, max(0.0, outer_radius_km / 5.0))
+
+                regional_penalty = int(
+                    round(excess_angle * 150.0 * radius_weight)
+                )
+
+        return actual + backtrack_penalty + regional_penalty
 
     cost_callback = routing.RegisterTransitCallback(route_cost_seconds)
     routing.SetArcCostEvaluatorOfAllVehicles(cost_callback)
