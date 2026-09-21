@@ -1580,6 +1580,23 @@ def assign_common_stops_to_routes(
         factory_angles.append(math.atan2(y, x))
         factory_radii_km.append(haversine_km((factory_lat, factory_lon), (lat, lon)))
 
+    # Her durağın yol ağı üzerinde kendisine en yakın diğer durağa olan süresi.
+    # Bir rota bu doğal komşuluğu atlayıp çok uzaktaki bir durağa sıçrıyorsa,
+    # aşağıdaki maliyet fonksiyonu bunu hafifçe cezalandırır.
+    nearest_stop_seconds: dict[int, float] = {}
+    for matrix_index in stop_matrix_indices:
+        neighbor_times = [
+            min(
+                float(duration_matrix[matrix_index][other_index]),
+                float(duration_matrix[other_index][matrix_index]),
+            )
+            for other_index in stop_matrix_indices
+            if other_index != matrix_index
+        ]
+        nearest_stop_seconds[matrix_index] = (
+            min(neighbor_times) if neighbor_times else 0.0
+        )
+
     def travel_seconds(from_index: int, to_index: int) -> int:
         """Gerçek sürüş + durak hizmet süresi. Süre kısıtı yalnızca bunu kullanır."""
         from_node = manager.IndexToNode(from_index)
@@ -1653,7 +1670,29 @@ def assign_common_stops_to_routes(
                     round(excess_angle * 150.0 * radius_weight)
                 )
 
-        return actual + backtrack_penalty + regional_penalty
+        # İzole durak / uzun sıçrama cezası:
+        # İki durak arasındaki OSRM süresi, her iki durağın doğal en yakın
+        # komşuluk süresinden belirgin biçimde uzunsa bu bağlantı hafifçe
+        # pahalılaştırılır. Böylece tek bir uzak durağın yanlış rotaya
+        # bağlanıp uzun bir kol oluşturması azaltılır. Fabrika bağlantıları
+        # bu cezaya dahil edilmez.
+        isolation_penalty = 0
+        if from_full != 0 and to_full != 0:
+            arc_seconds = float(duration_matrix[from_full][to_full])
+            local_reference = max(
+                nearest_stop_seconds.get(from_full, 0.0),
+                nearest_stop_seconds.get(to_full, 0.0),
+            )
+            allowed_jump = max(240.0, local_reference * 1.8)
+            excess_jump = max(0.0, arc_seconds - allowed_jump)
+            isolation_penalty = int(round(excess_jump * 0.8))
+
+        return (
+            actual
+            + backtrack_penalty
+            + regional_penalty
+            + isolation_penalty
+        )
 
     cost_callback = routing.RegisterTransitCallback(route_cost_seconds)
     routing.SetArcCostEvaluatorOfAllVehicles(cost_callback)
