@@ -1504,6 +1504,7 @@ def assign_common_stops_to_routes(
     time_limit_seconds: int = 10,
     require_all_vehicles_active: bool = False,
     vehicle_capacities: Sequence[int] | None = None,
+    target_vehicle_loads: Sequence[int] | None = None,
 ) -> list[list[CommonStop]]:
     """Ortak durakları OR-Tools kapasite kısıtlı araç rotalama modeliyle dağıtır.
 
@@ -1564,21 +1565,33 @@ def assign_common_stops_to_routes(
             return stop_matrix_indices[local_node - 1]
         return None
 
-    # Fabrika merkezli açı/radyus bilgileri bir kez hesaplanır. Böylece
-    # optimizasyon sırasında sürekli trigonometrik hesap yapılmaz.
-    factory_lat, factory_lon = coordinates[0]
-    factory_angles: list[float | None] = []
-    factory_radii_km: list[float] = []
+    # Bölgesel bütünlük fabrikaya göre değil Eskişehir içindeki durakların
+    # geometrik merkezine göre ölçülür. Fabrika Bozüyük'te olduğu için fabrika
+    # merkezli açı kullanmak şehir içindeki farklı mahalleleri yapay olarak
+    # aynı yöne sıkıştırabiliyordu.
+    stop_points = list(coordinates[1:])
+    regional_center_lat = (
+        sum(point[0] for point in stop_points) / len(stop_points)
+        if stop_points else ESKISEHIR_CENTER[0]
+    )
+    regional_center_lon = (
+        sum(point[1] for point in stop_points) / len(stop_points)
+        if stop_points else ESKISEHIR_CENTER[1]
+    )
+    regional_angles: list[float | None] = []
+    regional_radii_km: list[float] = []
     for point_index, (lat, lon) in enumerate(coordinates):
         if point_index == 0:
-            factory_angles.append(None)
-            factory_radii_km.append(0.0)
+            regional_angles.append(None)
+            regional_radii_km.append(0.0)
             continue
-        mean_lat_rad = math.radians((factory_lat + lat) / 2.0)
-        x = math.radians(lon - factory_lon) * math.cos(mean_lat_rad)
-        y = math.radians(lat - factory_lat)
-        factory_angles.append(math.atan2(y, x))
-        factory_radii_km.append(haversine_km((factory_lat, factory_lon), (lat, lon)))
+        mean_lat_rad = math.radians((regional_center_lat + lat) / 2.0)
+        x = math.radians(lon - regional_center_lon) * math.cos(mean_lat_rad)
+        y = math.radians(lat - regional_center_lat)
+        regional_angles.append(math.atan2(y, x))
+        regional_radii_km.append(
+            haversine_km((regional_center_lat, regional_center_lon), (lat, lon))
+        )
 
     # Her durağın yol ağı üzerinde kendisine en yakın diğer durağa olan süresi.
     # Bir rota bu doğal komşuluğu atlayıp çok uzaktaki bir durağa sıçrıyorsa,
@@ -1653,21 +1666,21 @@ def assign_common_stops_to_routes(
         # Merkeze yakın noktalarda açı anlamını yitirdiği için ceza otomatik azalır.
         regional_penalty = 0
         if from_full != 0 and to_full != 0:
-            from_angle = factory_angles[from_full]
-            to_angle = factory_angles[to_full]
+            from_angle = regional_angles[from_full]
+            to_angle = regional_angles[to_full]
             if from_angle is not None and to_angle is not None:
                 angular_diff = abs(from_angle - to_angle)
                 angular_diff = min(angular_diff, 2 * math.pi - angular_diff)
-                excess_angle = max(0.0, angular_diff - math.radians(40.0))
+                excess_angle = max(0.0, angular_diff - math.radians(28.0))
 
                 outer_radius_km = min(
-                    factory_radii_km[from_full],
-                    factory_radii_km[to_full],
+                    regional_radii_km[from_full],
+                    regional_radii_km[to_full],
                 )
-                radius_weight = min(1.0, max(0.0, outer_radius_km / 5.0))
+                radius_weight = min(1.0, max(0.20, outer_radius_km / 3.0))
 
                 regional_penalty = int(
-                    round(excess_angle * 150.0 * radius_weight)
+                    round(excess_angle * 520.0 * radius_weight)
                 )
 
         # İzole durak / uzun sıçrama cezası:
@@ -1683,9 +1696,9 @@ def assign_common_stops_to_routes(
                 nearest_stop_seconds.get(from_full, 0.0),
                 nearest_stop_seconds.get(to_full, 0.0),
             )
-            allowed_jump = max(240.0, local_reference * 1.8)
+            allowed_jump = max(180.0, local_reference * 1.55)
             excess_jump = max(0.0, arc_seconds - allowed_jump)
-            isolation_penalty = int(round(excess_jump * 0.8))
+            isolation_penalty = int(round(excess_jump * 1.35))
 
         return (
             actual
@@ -1711,6 +1724,27 @@ def assign_common_stops_to_routes(
         "Capacity",
     )
 
+    capacity_dimension = routing.GetDimensionOrDie("Capacity")
+
+    # Bölgesel/esnek 4 servis modu: doluluklar sert eşitlenmez. Kullanıcının
+    # referans ekranındaki yapı gibi iki yoğun ve iki kompakt rota oluşması için
+    # yumuşak hedefler verilir. Coğrafi rota maliyeti hâlâ aynı anda optimize
+    # edildiği için hedef uğruna şehrin uzak bölgeleri zorla birleştirilmez.
+    if target_vehicle_loads is not None:
+        targets = [int(value) for value in target_vehicle_loads]
+        if len(targets) != vehicle_count:
+            raise ValueError("Doluluk hedefi sayısı araç sayısıyla aynı olmalıdır.")
+        if sum(targets) != employee_count:
+            raise ValueError("Doluluk hedeflerinin toplamı çalışan sayısıyla aynı olmalıdır.")
+        for vehicle_no, target in enumerate(targets):
+            if target < 0 or target > effective_capacities[vehicle_no]:
+                raise ValueError("Bir doluluk hedefi araç kapasitesinin dışında.")
+            end_index = routing.End(vehicle_no)
+            # 650 puan/yolcu: hedefi yönlendirir ama bölgesel rota maliyetinin
+            # önüne geçecek kadar sert değildir.
+            capacity_dimension.SetCumulVarSoftLowerBound(end_index, target, 650)
+            capacity_dimension.SetCumulVarSoftUpperBound(end_index, target, 650)
+
     # Kapasite yalnızca üst sınırdır; yolcu sayıları eşitlenmez.
     # İstenirse tüm araçların aktif olması solver seviyesinde zorlanabilir.
     # Ana Streamlit akışı sabit rota sayısını daha sağlam biçimde, çözüm sonrası
@@ -1727,7 +1761,6 @@ def assign_common_stops_to_routes(
             )
 
     if vehicle_capacities is not None:
-        capacity_dimension = routing.GetDimensionOrDie("Capacity")
         for vehicle_no, vehicle_capacity in enumerate(effective_capacities):
             # Karma filoda hiçbir aracı eşit doluluğa zorlamıyoruz; ancak özellikle
             # küçük servislerin 8-9 kişi gibi çok düşük dolulukta kalmasını
@@ -1749,6 +1782,8 @@ def assign_common_stops_to_routes(
     parameters = pywrapcp.DefaultRoutingSearchParameters()
     parameters.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PARALLEL_CHEAPEST_INSERTION
     parameters.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    if target_vehicle_loads is not None:
+        time_limit_seconds = max(time_limit_seconds, 25)
     parameters.time_limit.FromSeconds(max(1, time_limit_seconds))
     parameters.log_search = False
     solution = routing.SolveWithParameters(parameters)
